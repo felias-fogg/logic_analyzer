@@ -622,7 +622,9 @@ void captureMicro() {
    * dump the samples back to the SUMP client.  nothing special
    * is done for any triggers, this is effectively the 0/100 buffer split.
    */
-  for (i = 0 ; i < readCount; i++) {
+
+  //Reversing dumping to be compatible with PulseView 0.4.1
+  for (i = readCount; i > 0; i--) {
 #ifdef USE_PORTD
     Serial.write(logicdata[i] >> 2);
 #else
@@ -697,7 +699,9 @@ void captureMilli() {
       delay(delayTime);
     }
   }
-  for (i = 0 ; i < readCount; i++) {
+
+  //Reversing dumping to be compatible with PulseView 0.4.1
+  for (i = readCount; i > 0; i--) {
 #ifdef USE_PORTD
     Serial.write(logicdata[i] >> 2);
 #else
@@ -886,16 +890,18 @@ void triggerMicro() {
    *
    * our buffer starts one entry above the last read entry.
    */
-  logicIndex++;
+
+  //Reversing dumping to be compatible with PulseView 0.4.1
+  //logicIndex++;
 
   for (i = 0 ; i < readCount; i++) {
-    if (logicIndex >= readCount) {
-      logicIndex = 0;
+    if (logicIndex < 0 ) {
+      logicIndex = readCount-1;
     }
 #ifdef USE_PORTD
-    Serial.write(logicdata[logicIndex++] >> 2);
+    Serial.write(logicdata[logicIndex--] >> 2);
 #else
-    Serial.write(logicdata[logicIndex++]);
+    Serial.write(logicdata[logicIndex--]);
 #endif
   }
 }

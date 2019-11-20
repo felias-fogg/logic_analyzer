@@ -14441,7 +14441,8 @@ void captureInline4mhz() {
    * dump the samples back to the SUMP client.  nothing special
    * is done for any triggers, this is effectively the 0/100 buffer split.
    */
-  for (i = 0 ; i < readCount; i++) {
+  //Reversing dumping to be compatible with PulseView 0.4.1
+  for (i = readCount; i > 0; i--) {
 #ifdef USE_PORTD
     Serial.write(logicdata[i] >> 2);
 #else
