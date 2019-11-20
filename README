@@ -1,6 +1,14 @@
 SUMP compatible logic analyzer for Arduino
 ==========================================
 
+
+IMPORTANT NOTE:
+Dumping of captured data is reversed to be compatible with PulseView 0.4.1
+This results in reversed captures in all other SUMP clients!
+So for other clients please use the original version of this program:
+https://github.com/gillham/logic_analyzer
+
+
 This Arduino sketch implements a SUMP protocol compatible with the standard
 SUMP client as well as the alternative client from here:
 	http://www.lxtreme.nl/ols/
