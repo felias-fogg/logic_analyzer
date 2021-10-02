@@ -45,7 +45,7 @@
  */
 
 void captureInline2mhz() {
-  unsigned int i;
+  int i;
 
   /*
    * basic trigger, wait until all trigger conditions are met on port.
@@ -14442,7 +14442,11 @@ void captureInline2mhz() {
    * is done for any triggers, this is effectively the 0/100 buffer split.
    */
   //Reversing dumping to be compatible with PulseView 0.4.1
-  for (i = readCount; i > 0; i--) {
+#ifdef REVERSED
+  for (i = readCount-1; i >= 0; i--) {
+#else
+  for (i = 0 ; i < readCount; i++) {
+#endif
 #ifdef USE_PORTD
     Serial.write(logicdata[i] >> 2);
 #else

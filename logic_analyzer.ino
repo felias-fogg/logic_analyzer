@@ -66,6 +66,15 @@
  *
  */
 
+/* draslisz reversed the captured stream in order to be compatible wuth PulseView
+ * felias-fogg corrected the case that a trigger is used (then the buffer is used in a cyclic way)
+ * and made all reverse outputs conditional on the compile time constant REVERSED.
+ * So, let' say this is version 0.15 (and it also gets a different name: AGLAREVv0).
+ * Oct 2021
+ */
+
+#define REVERSED
+
 /*
  * Function prototypes so this can compile from the cli.
  * You'll need the 'arduino-core' package and to check the paths in the
@@ -84,6 +93,8 @@ void debugdump(void);
 void prettydump(void);
 void captureInline4mhz(void);
 void captureInline2mhz(void);
+
+
 
 /*
  * Should we use PORTD or PORTB?  (default is PORTB)
@@ -199,10 +210,14 @@ int savecount = 0;
 #endif /* DEBUG */
 
 byte logicdata[MAX_CAPTURE_SIZE];
-unsigned int logicIndex = 0;
-unsigned int triggerIndex = 0;
-unsigned int readCount = MAX_CAPTURE_SIZE;
-unsigned int delayCount = 0;
+// Removed 'unsigned' from the variables below
+// so that one can output the data in reverse without problems
+// should not cause any problem as long as we stay below a buffer size of
+// of 32000.
+int logicIndex = 0;
+int triggerIndex = 0;
+int readCount = MAX_CAPTURE_SIZE;
+int delayCount = 0;
 unsigned int trigger = 0;
 unsigned int trigger_values = 0;
 unsigned int useMicro = 0;
@@ -274,7 +289,7 @@ void loop()
     switch (cmdByte) {
     case SUMP_RESET:
       /*
-         * We don't do anything here as some unsupported extended commands have
+       * We don't do anything here as some unsupported extended commands have
        * zero bytes and are mistaken as resets.  This can trigger false resets
        * so we don't erase the data or do anything for a reset.
        */
@@ -288,14 +303,14 @@ void loop()
       break;
     case SUMP_ARM:
       /*
-         * Zero out any previous samples before arming.
+       * Zero out any previous samples before arming.
        * Done here instead via reset due to spurious resets.
        */
       for (i = 0 ; i < MAX_CAPTURE_SIZE; i++) {
         logicdata[i] = 0;
       }
       /*
-         * depending on the sample rate we need to delay in microseconds
+       * depending on the sample rate we need to delay in microseconds
        * or milliseconds.  We can't do the complex trigger at 1MHz
        * so in that case (delayTime == 1 and triggers enabled) use
        * captureMicro() instead of triggerMicro().
@@ -325,7 +340,7 @@ void loop()
       break;
     case SUMP_TRIGGER_MASK:
       /*
-         * the trigger mask byte has a '1' for each enabled trigger so
+       * the trigger mask byte has a '1' for each enabled trigger so
        * we can just use it directly as our trigger mask.
        */
       getCmd();
@@ -337,7 +352,7 @@ void loop()
       break;
     case SUMP_TRIGGER_VALUES:
       /*
-         * trigger_values can be used directly as the value of each bit
+       * trigger_values can be used directly as the value of each bit
        * defines whether we're looking for it to be high or low.
        */
       getCmd();
@@ -353,7 +368,7 @@ void loop()
       break;
     case SUMP_SET_DIVIDER:
       /*
-         * the shifting needs to be done on the 32bit unsigned long variable
+       * the shifting needs to be done on the 32bit unsigned long variable
        * so that << 16 doesn't end up as zero.
        */
       getCmd();
@@ -366,7 +381,7 @@ void loop()
       break;
     case SUMP_SET_READ_DELAY_COUNT:
       /*
-         * this just sets up how many samples there should be before
+       * this just sets up how many samples there should be before
        * and after the trigger fires.  The readCount is total samples
        * to return and delayCount number of samples after the trigger.
        * this sets the buffer splits like 0/100, 25/75, 50/50
@@ -390,7 +405,7 @@ void loop()
       break;
     case SUMP_GET_METADATA:
       /*
-         * We return a description of our capabilities.
+       * We return a description of our capabilities.
        * Check the function's comments below.
        */
       get_metadata();
@@ -400,7 +415,7 @@ void loop()
       break;
 #ifdef DEBUG_MENU
       /*
-         * a couple of debug commands used during development.
+       * a couple of debug commands used during development.
        */
     case '?':
       Serial.println("");
@@ -533,7 +548,7 @@ void getCmd() {
  */
 
 void captureMicro() {
-  unsigned int i;
+   int i;
 
   /*
    * basic trigger, wait until all trigger conditions are met on port.
@@ -624,7 +639,11 @@ void captureMicro() {
    */
 
   //Reversing dumping to be compatible with PulseView 0.4.1
-  for (i = readCount; i > 0; i--) {
+#ifdef REVERSED
+  for (i = readCount-1; i >= 0; i--) {
+#else
+  for (i = 0 ; i < readCount; i++) {
+#endif
 #ifdef USE_PORTD
     Serial.write(logicdata[i] >> 2);
 #else
@@ -651,7 +670,7 @@ void captureMicro() {
  * this basic functionality.
  */
 void captureMilli() {
-  unsigned int i = 0;
+   int i = 0;
 
   if (rleEnabled) {
     /*
@@ -701,7 +720,11 @@ void captureMilli() {
   }
 
   //Reversing dumping to be compatible with PulseView 0.4.1
-  for (i = readCount; i > 0; i--) {
+#ifdef REVERSED
+  for (i = readCount-1; i >= 0; i--) {
+#else
+  for (i = 0 ; i < readCount; i++) {
+#endif
 #ifdef USE_PORTD
     Serial.write(logicdata[i] >> 2);
 #else
@@ -719,7 +742,7 @@ void captureMilli() {
  *
  */
 void triggerMicro() {
-  unsigned int i = 0;
+  int i = 0;
 
   logicIndex = 0;
   triggerIndex = 0;
@@ -892,8 +915,7 @@ void triggerMicro() {
    */
 
   //Reversing dumping to be compatible with PulseView 0.4.1
-  //logicIndex++;
-
+#ifdef REVERSED
   for (i = 0 ; i < readCount; i++) {
     if (logicIndex < 0 ) {
       logicIndex = readCount-1;
@@ -904,6 +926,19 @@ void triggerMicro() {
     Serial.write(logicdata[logicIndex--]);
 #endif
   }
+#else
+  logicIndex++;
+  for (i = 0 ; i < readCount; i++) {
+    if (logicIndex >= readCount) {
+      logicIndex = 0;
+    }
+#ifdef USE_PORTD
+    Serial.write(logicdata[logicIndex++] >> 2);
+#else
+    Serial.write(logicdata[logicIndex++]);
+#endif
+  }
+#endif
 }
 
 /*
@@ -946,6 +981,11 @@ void get_metadata() {
 #if defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
   Serial.write('M');
 #endif /* Mega */
+#if defined(REVERSED)
+  Serial.write('R');
+  Serial.write('E');
+  Serial.write('V');
+#endif
   Serial.write('v');
   Serial.write('0');
   Serial.write((uint8_t)0x00);
