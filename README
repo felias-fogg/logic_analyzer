@@ -8,6 +8,9 @@ This results in reversed captures in all other SUMP clients!
 So for other clients please use the original version of this program:
 https://github.com/gillham/logic_analyzer
 
+I added a compile constant REVERSED to be able to undo this change,
+made some small fixes, and changed the name of the analyzer to AGLAREVv0.
+
 
 This Arduino sketch implements a SUMP protocol compatible with the standard
 SUMP client as well as the alternative client from here:
