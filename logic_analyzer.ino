@@ -150,6 +150,15 @@ void captureInline2mhz(void);
 #define SUMP_TRIGGER_VALUES 0xC1
 #define SUMP_TRIGGER_CONFIG 0xC2
 
+/* some commands that are used by PulseView, but that are undocumented */
+#define SUMP_UNKNOWN_C3 0xC3
+#define SUMP_UNKNOWN_C4 0xC4
+#define SUMP_UNKNOWN_C5 0xC5
+#define SUMP_UNKNOWN_C6 0xC6
+#define SUMP_UNKNOWN_C7 0xC7
+#define SUMP_UNKNOWN_C8 0xC8
+#define SUMP_UNKNOWN_C9 0xC9
+
 /* Most flags (except RLE) are ignored. */
 #define SUMP_SET_DIVIDER 0x80
 #define SUMP_SET_READ_DELAY_COUNT 0x81
@@ -228,7 +237,9 @@ boolean rleEnabled = 0;
 void setup()
 {
   Serial.begin(115200);
-
+  DEBUG_ON;
+  delay(10);
+  DEBUG_OFF;
   /*
    * set debug pin (digital pin 8) to output right away so it settles.
    * this gets toggled during sampling as a way to measure
@@ -306,9 +317,11 @@ void loop()
        * Zero out any previous samples before arming.
        * Done here instead via reset due to spurious resets.
        */
+      DEBUG_ON;
       for (i = 0 ; i < MAX_CAPTURE_SIZE; i++) {
         logicdata[i] = 0;
       }
+      DEBUG_OFF;
       /*
        * depending on the sample rate we need to delay in microseconds
        * or milliseconds.  We can't do the complex trigger at 1MHz
@@ -363,6 +376,13 @@ void loop()
 #endif
       break;
     case SUMP_TRIGGER_CONFIG:
+    case SUMP_UNKNOWN_C3:
+    case SUMP_UNKNOWN_C4:
+    case SUMP_UNKNOWN_C5:
+    case SUMP_UNKNOWN_C6:
+    case SUMP_UNKNOWN_C7:
+    case SUMP_UNKNOWN_C8:
+    case SUMP_UNKNOWN_C9:
       /* read the rest of the command bytes, but ignore them. */
       getCmd();
       break;

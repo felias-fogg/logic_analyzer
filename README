@@ -11,6 +11,11 @@ https://github.com/gillham/logic_analyzer
 I added a compile constant REVERSED to be able to undo this change,
 made some small fixes, and changed the name of the analyzer to AGLAREVv0.
 
+Further, I "fixed" the trigger problem, which resulted in capturing sequences
+where the trigger condition was apparently not satisfied. The deeper reason for that
+was that the PulseView client sends some unknown 5-byte commands (e.g., 0xC6),
+which contains a 0x01 byte that starts a capture. 
+
 
 This Arduino sketch implements a SUMP protocol compatible with the standard
 SUMP client as well as the alternative client from here:
