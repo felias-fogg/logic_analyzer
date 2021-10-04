@@ -1,8 +1,9 @@
 /*
  *
- * SUMP Protocol Implementation for Arduino boards.
+ * SUMP Protocol Implementation for Arduino boards (compatible with PulseView)
  *
  * Copyright (c) 2011,2012,2013,2014,2015 Andrew Gillham
+ * Copyright (c) 2021 Bernhard Nebel
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,83 +25,42 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- *
  */
 
 /*
- * NOTE: v0.09 switched the channels BACK to pins 8-13 for trigger reliability.
- *       Please report any issues.  Uncomment USE_PORTD for pins 2-7.
+ * This Arduino sketch implements the SUMP protocol compatible with PulseView for 
+ * AVR MCUs. It is based on Andrew Gillham's implementation, but the acquisition part 
+ * has been completely redesigned. It uses inline assembler and relies on Timer1
+ * for sampling up to a frequency of 1 MHz. For 2 MHz and 5 MHz special purpose acquisition 
+ * procedures are used that wait for the trigger condition, but that are not able to
+ * store the required amount of data before the trigger point. The 2 MHz acquisition procedure 
+ * uses an inline assembly function. The 5 MHz acquisition procedure is a rolled out loop,
+ * which samples at a rate of 5.3333 MHz -- and corrects this error by inserting a NOP after 
+ * every fifth sample. In any case, in both procedures, the sample matching the trigger (if any) 
+ * is stored as the first sample (which was not the case with Andrew's implementation).
+ * 
+ * The sketch works probably also with the standard OLS clients when the compile time
+ * constant REVERSED is undefined. Since I am not able to install any of the clients,
+ * I cannot check that, though.
  *
- * This Arduino sketch implements a SUMP protocol compatible with the standard
- * SUMP client as well as the alternative client from here:
- *	http://www.lxtreme.nl/ols/
- *
+ * The sketch should work for the Arduino UNO, Nano, Pro, Pro Mini (i.e. all ATmega328P based boards), 
+ * and Mega (i.e., all ATmega1280 and ATmega2560 based boards), provided the clock frequency is 16 MHz.  
+ * It is probably possible to adapt it to Leonardo and Pro Micro boards, but this is up to you.
+ * 
  * This SUMP protocol compatible logic analyzer for the Arduino board supports
- * 6 channels consisting of digital pins 2-7, which are the last 6 bits (2-7)
- * of PORTD.  Bits 0 & 1 are the UART RX/TX pins.
- *
+ * 6 channels consisting of digital pins 8-13, where pin 13 is the LED pin.
  * On the Arduino Mega board 8 channels are supported and 7k of samples.
  * Pins 22-29 (Port A) are used by default, you can change the 'CHANPIN' below
  * if something else works better for you.
  *
- * To use this with the original or alternative SUMP clients,
- * use these settings:
- *
- * Sampling rate: 4MHz (or lower) (no 2MHz on ATmega168)
- * Channel Groups: 0 (zero) only
- * Recording Size:
- *    ATmega168:  532 (or lower)
- *    ATmega328:  1024 (or lower)
- *    ATmega2560: 7168 (or lower)
- * Noise Filter: doesn't matter
- * RLE: disabled (unchecked)
- *    NOTE: Preliminary RLE support for 50Hz or less exists, please test it.
- *
- * Triggering is still a work in progress, but generally works for samples
- * below 1MHz.  1MHz works for a basic busy wait trigger that doesn't store
- * until after the trigger fires.
- * Please try it out and report back.
- *
- * Release: v0.14 December 16, 2015.
- *
+ * 
  */
+#define FIRMWAREVERSION "0.21"
 
-/* draslisz reversed the captured stream in order to be compatible wuth PulseView
- * felias-fogg corrected the case that a trigger is used (then the buffer is used in a cyclic way)
- * and made all reverse outputs conditional on the compile time constant REVERSED.
- * So, let' say this is version 0.15 (and it also gets a different name: AGLAREVv0).
- * Oct 2021
- */
+#define MAXMHZ 5 // 2 or 1 are also options, and they both save a lot of flash space!
 
-#define REVERSED
+#define REVERSED // PulseView wants to receive the sampled data in reverse order
 
-/*
- * Function prototypes so this can compile from the cli.
- * You'll need the 'arduino-core' package and to check the paths in the
- * Makefile.
- */
-
-void triggerMicro(void);
-void captureMicro(void);
-void captureMilli(void);
-void getCmd(void);
-void setupDelay(void);
-void blinkled(void);
-void get_metadata(void);
-void debugprint(void);
-void debugdump(void);
-void prettydump(void);
-void captureInline4mhz(void);
-void captureInline2mhz(void);
-
-
-
-/*
- * Should we use PORTD or PORTB?  (default is PORTB)
- * PORTD support with triggers seems to work but needs more testing.
- */
-//#define USE_PORTD 1
 
 /*
  * Arduino device profile:      ols.profile-agla.cfg
@@ -117,15 +77,6 @@ void captureInline2mhz(void);
 #define CHAN6 28
 #define CHAN7 29
 #else
-#if defined(USE_PORTD)
-#define CHANPIN PIND
-#define CHAN0 2
-#define CHAN1 3
-#define CHAN2 4
-#define CHAN3 5
-#define CHAN4 6
-#define CHAN5 7
-#else
 #define CHANPIN PINB
 #define CHAN0 8
 #define CHAN1 9
@@ -134,7 +85,6 @@ void captureInline2mhz(void);
 #define CHAN4 12
 /* Comment out CHAN5 if you don't want to use the LED pin for an input */
 #define CHAN5 13
-#endif /* USE_PORTD */
 #endif
 #define ledPin 13
 
@@ -169,42 +119,18 @@ void captureInline2mhz(void);
 #define SUMP_SELF_TEST 0x03
 #define SUMP_GET_METADATA 0x04
 
-/* ATmega168:  532 (or lower)
- * ATmega328:  1024 (or lower)
- * ATmega2560: 7168 (or lower)
- */
 #if defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
-#define DEBUG_CAPTURE_SIZE 7168
-#define CAPTURE_SIZE 7168
-#elif defined(__AVR_ATmega32U4__)
-#define DEBUG_CAPTURE_SIZE 2048
-#define CAPTURE_SIZE 2048
+#define MAX_CAPTURE_SIZE 7168
 #elif defined(__AVR_ATmega328P__)
-#define DEBUG_CAPTURE_SIZE 1024
-#define CAPTURE_SIZE 1024
+#define MAX_CAPTURE_SIZE 1536
 #else
-#define DEBUG_CAPTURE_SIZE 532
-#define CAPTURE_SIZE 532
+#error "MCU is not supported"
 #endif
 
-#ifdef USE_PORTD
-#define DEBUG_ENABLE DDRB = DDRB | B00000001
-#define DEBUG_ON PORTB = B00000001
-#define DEBUG_OFF PORTB = B00000000
-#else
 #define DEBUG_ENABLE DDRD = DDRD | B10000000
 #define DEBUG_ON PORTD = B10000000
 #define DEBUG_OFF PORTD = B00000000
-#endif /* USE_PORTD */
 
-//#define DEBUG_MENU
-//#define DEBUG
-
-#ifdef DEBUG
-#define MAX_CAPTURE_SIZE DEBUG_CAPTURE_SIZE
-#else
-#define MAX_CAPTURE_SIZE CAPTURE_SIZE
-#endif /* DEBUG */
 
 /*
  * SUMP command from host (via serial)
@@ -213,23 +139,16 @@ void captureInline2mhz(void);
 int cmdByte = 0;
 byte cmdBytes[5];
 
-#ifdef DEBUG
-byte savebytes[128];
-int savecount = 0;
-#endif /* DEBUG */
-
 byte logicdata[MAX_CAPTURE_SIZE];
 // Removed 'unsigned' from the variables below
 // so that one can output the data in reverse without problems
 // should not cause any problem as long as we stay below a buffer size of
 // of 32000.
 int logicIndex = 0;
-int triggerIndex = 0;
 int readCount = MAX_CAPTURE_SIZE;
 int delayCount = 0;
-unsigned int trigger = 0;
-unsigned int trigger_values = 0;
-unsigned int useMicro = 0;
+byte trigger = 0;
+byte trigger_values = 0;
 unsigned int delayTime = 0;
 unsigned long divider = 0;
 boolean rleEnabled = 0;
@@ -237,9 +156,6 @@ boolean rleEnabled = 0;
 void setup()
 {
   Serial.begin(115200);
-  DEBUG_ON;
-  delay(10);
-  DEBUG_OFF;
   /*
    * set debug pin (digital pin 8) to output right away so it settles.
    * this gets toggled during sampling as a way to measure
@@ -264,31 +180,6 @@ void setup()
   pinMode(ledPin, OUTPUT);
 #endif
 #endif /* Mega */
-
-#if 0
-
-  /*
-   * This sets up timer2 at 100KHz to toggle a pin.  This is useful
-   * for debugging as it gives an internally precise signal source.
-   * This doesn't work on the Arduino Mega.  Use on the Uno or older.
-   * We're using the same clock source for the timer & our sampling.
-   */
-
-  /* Set OC2A (digital pin 11) to output so we can toggle it. */
-  pinMode(11, OUTPUT);
-
-  /* reset timer to zero */
-  TCNT2 = 0;
-  TCCR2A = 0;
-  TCCR2B = 0;
-  OCR2A = 0;
-
-  /* Set CTC mode and toggle on compare. */
-  TCCR2A = _BV (COM2A0) | _BV (WGM21);
-  /* 79 = 100KHz, 15 = 500KHz, 7 = 1MHz */
-  OCR2A = 79;
-  TCCR2B = _BV (CS20);
-#endif
 }
 
 void loop()
@@ -317,39 +208,10 @@ void loop()
        * Zero out any previous samples before arming.
        * Done here instead via reset due to spurious resets.
        */
-      DEBUG_ON;
       for (i = 0 ; i < MAX_CAPTURE_SIZE; i++) {
         logicdata[i] = 0;
       }
-      DEBUG_OFF;
-      /*
-       * depending on the sample rate we need to delay in microseconds
-       * or milliseconds.  We can't do the complex trigger at 1MHz
-       * so in that case (delayTime == 1 and triggers enabled) use
-       * captureMicro() instead of triggerMicro().
-       */
-
-      if (divider == 24) {
-        /* 4.0MHz */
-        captureInline4mhz();
-      }
-      else if (divider == 49) {
-        /* 2.0MHz */
-#if !defined(__AVR_ATmega168__)
-        captureInline2mhz();
-#endif
-      }
-      else if (useMicro) {
-        if (trigger && (delayTime != 1)) {
-          triggerMicro();
-        }
-        else {
-          captureMicro();
-        }
-      }
-      else {
-        captureMilli();
-      }
+      acquire();
       break;
     case SUMP_TRIGGER_MASK:
       /*
@@ -357,11 +219,7 @@ void loop()
        * we can just use it directly as our trigger mask.
        */
       getCmd();
-#ifdef USE_PORTD
-      trigger = cmdBytes[0] << 2;
-#else
       trigger = cmdBytes[0];
-#endif
       break;
     case SUMP_TRIGGER_VALUES:
       /*
@@ -369,11 +227,7 @@ void loop()
        * defines whether we're looking for it to be high or low.
        */
       getCmd();
-#ifdef USE_PORTD
-      trigger_values = cmdBytes[0] << 2;
-#else
       trigger_values = cmdBytes[0];
-#endif
       break;
     case SUMP_TRIGGER_CONFIG:
     case SUMP_UNKNOWN_C3:
@@ -397,7 +251,6 @@ void loop()
       divider += cmdBytes[1];
       divider = divider << 8;
       divider += cmdBytes[0];
-      setupDelay();
       break;
     case SUMP_SET_READ_DELAY_COUNT:
       /*
@@ -421,117 +274,23 @@ void loop()
     case SUMP_SET_FLAGS:
       /* read the rest of the command bytes and check if RLE is enabled. */
       getCmd();
-      rleEnabled = ((cmdBytes[1] & B1000000) != 0);
+      // rleEnabled = ((cmdBytes[1] & B1000000) != 0);
       break;
     case SUMP_GET_METADATA:
-      /*
-       * We return a description of our capabilities.
-       * Check the function's comments below.
-       */
-      get_metadata();
+      send_metadata();
       break;
     case SUMP_SELF_TEST:
       /* ignored. */
-      break;
-#ifdef DEBUG_MENU
-      /*
-       * a couple of debug commands used during development.
-       */
-    case '?':
-      Serial.println("");
-#ifdef DEBUG
-      Serial.println("0 = clear cmd buffer");
-      Serial.println("1 = print cmd buffer");
-#endif /* DEBUG */
-      Serial.println("2 = print data buffer");
-      Serial.println("3 = pretty print buffer");
-      Serial.println("4 = capture at 4MHz");
-      Serial.println("5 = capture at 1MHz");
-      Serial.println("6 = capture at 500KHz");
-      break;
-#ifdef DEBUG
-    case '0':
-      /*
-         * This resets the debug buffer pointer, effectively clearing the
-       * previous commands out of the buffer. Clear the sample data as well.
-       * Just send a '0' from the Arduino IDE's Serial Monitor.
-       */
-      savecount = 0;
-      for (i = 0 ; i < MAX_CAPTURE_SIZE; i++) {
-        logicdata[i] = 0;
-      }
-      break;
-    case '1':
-      /*
-         * This is used to see what commands were sent to the device.
-       * you can use the Arduino serial monitor and send a '1' and get
-       * a debug printout.  useless except for development.
-       */
-      blinkled();
-      debugprint();
-      break;
-#endif /* DEBUG */
-    case '2':
-      /*
-         * This dumps the sample data to the serial port.
-       */
-      debugdump();
-      break;
-    case '3':
-      /*
-         * Prints a visual representation of the data buffer.
-       */
-      prettydump();
-      break;
-    case '4':
-      /*
-         * This runs a sample capture at 4MHz.
-       */
-      captureInline4mhz();
-      Serial.println("");
-      Serial.println("4MHz capture done.");
-      break;
-    case '5':
-      /*
-         * This runs a sample capture at 1MHz.
-       * delayTime = 1ms for 1MHz sampling.
-       */
-      delayTime = 1;
-      captureMicro();
-      Serial.println("");
-      Serial.println("1MHz capture done.");
-      break;
-    case '6':
-      /*
-         * This runs a sample capture at 500KHz.
-       * delayTime = 2ms for 500KHz.
-       */
-      delayTime = 1;
-      captureMicro();
-      Serial.println("");
-      Serial.println("500KHz capture done.");
-      break;
-#endif /* DEBUG_MENU */
-    default:
-      /* ignore any unrecognized bytes. */
       break;
     }
   }
 }
 
-void blinkled() {
-  digitalWrite(ledPin, HIGH);
-  delay(200);
-  digitalWrite(ledPin, LOW);
-  delay(200);
-}
 
 /*
  * Extended SUMP commands are 5 bytes.  A command byte followed by 4 bytes
  * of options. We already read the command byte, this gets the remaining
  * 4 bytes of the command.
- * If we're debugging we save the received commands in a debug buffer.
- * We need to make sure we don't overrun the debug buffer.
  */
 void getCmd() {
   delay(10);
@@ -539,483 +298,232 @@ void getCmd() {
   cmdBytes[1] = Serial.read();
   cmdBytes[2] = Serial.read();
   cmdBytes[3] = Serial.read();
-
-#ifdef DEBUG
-  if (savecount < 120 ) {
-    savebytes[savecount++] = ' ';
-    savebytes[savecount++] = cmdByte;
-    savebytes[savecount++] = cmdBytes[0];
-    savebytes[savecount++] = cmdBytes[1];
-    savebytes[savecount++] = cmdBytes[2];
-    savebytes[savecount++] = cmdBytes[3];
-  }
-#endif /* DEBUG */
 }
 
-/*
- * This function samples data using a microsecond delay function.
- * It also has rudimentary trigger support where it will just sit in
- * a busy loop waiting for the trigger conditions to occur.
- *
- * This loop is not clocked to the sample rate in any way, it just
- * reads the port as fast as possible waiting for a trigger match.
- * Multiple channels can have triggers enabled and can have different
- * trigger values.  All conditions must match to trigger.
- *
- * After the trigger fires (if it is enabled) the pins are sampled
- * at the appropriate rate.
- *
- */
-
-void captureMicro() {
-   int i;
-
-  /*
-   * basic trigger, wait until all trigger conditions are met on port.
-   * this needs further testing, but basic tests work as expected.
-   */
-  if (trigger) {
-    while ((trigger_values ^ CHANPIN) & trigger);
-  }
-
-  /*
-   * disable interrupts during capture to maintain precision.
-   * we're hand padding loops with NOP instructions so we absolutely
-   * cannot have any interrupts firing.
-   */
-  cli();
-
-  /*
-   * toggle pin a few times to activate trigger for debugging.
-   * this is used during development to measure the sample intervals.
-   * it is best to just leave the toggling in place so we don't alter
-   * any timing unexpectedly.
-   * Arduino digital pin 8 is being used here.
-   */
-  DEBUG_ENABLE;
-#ifdef DEBUG
-  DEBUG_ON;
-  delayMicroseconds(20);
-  DEBUG_OFF;
-  delayMicroseconds(20);
-  DEBUG_ON;
-  delayMicroseconds(20);
-  DEBUG_OFF;
-  delayMicroseconds(20);
+void acquire() {
+  switch (divider) {
+#if (MAXMHZ >= 5)
+  case 19: acquire5MHz(); // this has an unrolled loop with only rudimentary trigger handling
+    break;
 #endif
-
-  if (delayTime == 1) {
-    /*
-     * 1MHz sample rate = 1 uS delay so we can't use delayMicroseconds
-     * since our loop takes some time.  The delay is padded out by hand.
-     */
-    DEBUG_ON; /* debug timing measurement */
-    for (i = 0 ; i < readCount; i++) {
-      logicdata[i] = CHANPIN;
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-    }
-    DEBUG_OFF; /* debug timing measurement */
-  }
-  else if (delayTime == 2) {
-    /*
-     * 500KHz sample rate = 2 uS delay, still pretty fast so we pad this
-     * one by hand too.
-     */
-    DEBUG_ON; /* debug timing measurement */
-    for (i = 0 ; i < readCount; i++) {
-      logicdata[i] = CHANPIN;
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-    }
-    DEBUG_OFF; /* debug timing measurement */
-  }
-  else {
-    /*
-     * not 1MHz or 500KHz; delayMicroseconds(delay - 1) works fine here
-     * with two NOPs of padding. (based on measured debug pin toggles with
-     * a better logic analyzer)
-     * start of real measurement
-     */
-    DEBUG_ON; /* debug timing measurement */
-    for (i = 0 ; i < readCount; i++) {
-      logicdata[i] = CHANPIN;
-      delayMicroseconds(delayTime - 1);
-      __asm__("nop\n\t""nop\n\t");
-    }
-    DEBUG_OFF; /* debug timing measurement */
-  }
-
-  /* re-enable interrupts now that we're done sampling. */
-  sei();
-
-  /*
-   * dump the samples back to the SUMP client.  nothing special
-   * is done for any triggers, this is effectively the 0/100 buffer split.
-   */
-
-  //Reversing dumping to be compatible with PulseView 0.4.1
-#ifdef REVERSED
-  for (i = readCount-1; i >= 0; i--) {
-#else
-  for (i = 0 ; i < readCount; i++) {
+#if (MAXMHZ >= 2)
+  case 49: acquire2MHz(); // special purpose loop with only rudimentary trigger handling
+    break;
 #endif
-#ifdef USE_PORTD
-    Serial.write(logicdata[i] >> 2);
-#else
-    Serial.write(logicdata[i]);
-#endif
+  default: acquireSlow(); // all the 'slow' stuff up to 1 MHz
+    break;
   }
 }
 
-/*
- * This function does straight sampling with basic triggering.  It is
- * for those sample rates that can't be done via the 'delayMicrosecond()' call
- * which is limited to 16383 microseconds max delay.  That is about 62Hz max.
- * This is only used for sample rates < 100Hz.
- *
- * The basic triggering in this function will be replaced by a 'triggerMillis'
- * function eventually that uses the circular trigger buffer.
- *
- * Since we're using delay() and 20ms/50ms/100ms sample rates we're not
- * worried that the sample loops take a few microseconds more than we're
- * supposed to.
- * We could measure the sample loop and use delay(delayTime - 1), then
- * delayMicroseconds() and possibly a bit of NOP padding to ensure our
- * samples our a precise multiple of milliseconds, but for now we'll use
- * this basic functionality.
- */
-void captureMilli() {
-   int i = 0;
-
-  if (rleEnabled) {
-    /*
-     * very basic trigger, just like in captureMicros() above.
-     */
-    if (trigger) {
-      while ((trigger_values ^ (CHANPIN & B01111111)) & trigger);
-    }
-
-    byte lastSample = 0;
-    byte sampleCount = 0;
-
-    while (i < readCount) {
-      /*
-       * Implementation of the RLE unlimited protocol: timings might be off a little
-       */
-      if (lastSample == (CHANPIN & B01111111) && sampleCount < 127) {
-        sampleCount++;
-        delay(delayTime);
-        continue;
-      }
-      if (sampleCount != 0) {
-        logicdata[i] = B10000000 | sampleCount;
-        sampleCount = 0;
-        i++;
-        continue;
-      }
-      logicdata[i] = (CHANPIN & B01111111);
-      lastSample = (CHANPIN & B01111111);
-      delay(delayTime);
-
-      i++;
-    }
-  }
-  else {
-    /*
-     * very basic trigger, just like in captureMicros() above.
-     */
-    if (trigger) {
-      while ((trigger_values ^ CHANPIN) & trigger);
-    }
-
-    for (i = 0 ; i < readCount; i++) {
-      logicdata[i] = CHANPIN;
-      delay(delayTime);
-    }
-  }
-
-  //Reversing dumping to be compatible with PulseView 0.4.1
-#ifdef REVERSED
-  for (i = readCount-1; i >= 0; i--) {
-#else
-  for (i = 0 ; i < readCount; i++) {
-#endif
-#ifdef USE_PORTD
-    Serial.write(logicdata[i] >> 2);
-#else
-    Serial.write(logicdata[i]);
-#endif
-  }
-}
 
 /*
  * This function provides sampling with triggering and a circular trigger
- * buffer.
- * This works ok at 500KHz and lower sample rates.  We don't have enough time
- * with a 16MHz clock to sample at 1MHz into the circular buffer.  A 20MHz
- * clock might be ok but all of the timings would have to be redone.
- *
+ * buffer. Works up to 1 MHz.
  */
-void triggerMicro() {
+void acquireSlow() {
   int i = 0;
+  unsigned long top;
+  byte prescale = 1; // prescaler is 1
+  byte * ptr = &logicdata[0];
 
+  if (divider < 99) divider = 99; // means at most 1 MHz
+  top = (divider+1)/100*16;
+  if (top >= 65536) {
+    top = top / 256;
+    prescale = 4; // prescaler is 256
+  }
+  top--;
+  
+  // Configure Timer 1
+  TCCR1A = 0;
+  TCCR1B = _BV(WGM12) | prescale;
+  TCCR1C = 0;
+  OCR1A = top;
+  TCNT1 = 0;
+  
+  // initialize index
   logicIndex = 0;
-  triggerIndex = 0;
 
-  /*
-   * disable interrupts during capture to maintain precision.
-   * we're hand padding loops with NOP instructions so we absolutely
-   * cannot have any interrupts firing.
-   */
   cli();
 
-  /*
-   * toggle pin a few times to activate trigger for debugging.
-   * this is used during development to measure the sample intervals.
-   * it is best to just leave the toggling in place so we don't alter
-   * any timing unexpectedly.
-   * Arduino digital pin 8 is being used here.
-   */
-  DEBUG_ENABLE;
-#ifdef DEBUG
-  DEBUG_ON;
-  delayMicroseconds(20);
-  DEBUG_OFF;
-  delayMicroseconds(20);
-  DEBUG_ON;
-  delayMicroseconds(20);
-  DEBUG_OFF;
-  delayMicroseconds(20);
-#endif
-
-  if (delayTime == 1) {
-    /*
-     * 1MHz case.  We can't really do it at the moment.  Timing is too tight.
-     * We can fake it, or skip it, or rework it....
-     * This should be retested on a 20MHz clocked microcontroller.
-     * The data is flat out wrong for the 1MHz case.
-     */
-
-    /*
-     * return for now, the client will timeout eventually or the user will
-     * click stop.
-     */
-    return;
+  /* C source code is replaced by inline assembler below
+  do {
+    while (!(TIFR1 & _BV(OCF1A)));
+    TIFR1 |= _BV(OCF1A);
+    inp = CHANPIN;
+    logicdata[logicIndex++] = inp;
+    if (logicIndex >= readCount) {
+      logicIndex = 0;
+    }
+  } while ((trigger_values ^ inp ) & trigger); 
+  
+  // keep sampling for delayCount after trigger
+  for (i = 0 ; i < delayCount; i++) {
+    while (!(TIFR1 & _BV(OCF1A)));
+    TIFR1 |= _BV(OCF1A);
+    logicdata[logicIndex++] = CHANPIN;
+    if (logicIndex >= readCount) {
+      logicIndex = 0;
+    }
   }
-  else if (delayTime == 2) {
-    /*
-     * 500KHz case.  We should be able to manage this in time.
-     *
-     * busy loop reading CHANPIN until we trigger.
-     * we always start capturing at the start of the buffer
-     * and use it as a circular buffer
-     */
-    DEBUG_ON; /* debug timing measurement */
-    while ((trigger_values ^ (logicdata[logicIndex] = CHANPIN)) & trigger) {
-      /* DEBUG_OFF; */
-      /* increment index. */
-      logicIndex++;
-      if (logicIndex >= readCount) {
-        logicIndex = 0;
-      }
-      /*
-       * pad loop to 2.0 uS (with pin toggles it is 3 x nop)
-       * without pin toggles, will try 1 nop.
-       * __asm__("nop\n\t""nop\n\t""nop\n\t");
-       */
-      __asm__("nop\n\t");
-      /* DEBUG_ON; */
-    }
-    /* this pads the immediate trigger case to 2.0 uS, just as an example. */
-    __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-    DEBUG_OFF; /* debug timing measurement */
+  */
+  
+  asm volatile(
+    "\n\t"
+    "movw r22, %[LOGICDATAaddr]               ; save addr of logicdata\n\t"
+    "movw r20, r22                            ; copy start addr to r22:r23\n\t"                    
+    "add  r20, %A[READCOUNT]                  ; set stop addr in r20:r21\n\t"
+    "adc r21, %B[READCOUNT]\n"
+    "TRIGLOOP: sbis %[TIFR1addr], %[OCF1Abit] ; test for timer overflow (2 cycles)\n\t"
+    "rjmp TRIGLOOP                            ; (no cycle!) \n\t"
+    "sbi %[TIFR1addr], %[OCF1Abit]            ; clear overflow bit (2 cycles)\n\t"
+    "in __tmp_reg__, %[CHANPINaddr]           ; read input data (1 cycle)\n\t"
+    "st %a[LOGICDATAaddr]+, __tmp_reg__       ; store input to array and post increment (2 cycles)\n\t"
+    "cp %A[LOGICDATAaddr], r20                ; compare lower byte of ptr with lower byte of stop addr (1 cycle)\n\t"
+    "brne TRIGTEST                            ; OK, jump to test for trigger condition (worst case 1 cycle)\n\t"
+    "cp %B[LOGICDATAaddr], r21                ; compare high bytes (1 cycle)  \n\t"
+    "brne TRIGTEST                            ; OK, jump (2 cycles), otherwise execute next instr (1 cycle)\n\t"
+    "movw %A[LOGICDATAaddr], r22              ; restore original value (1 cycle)\n"
+    "TRIGTEST: eor __tmp_reg__, %[TRIGVAL]    ; inp = inp XOR trigger_value., i.e., zero if trigger value present (1 cycle)\n\t"
+    "and __tmp_reg__, %[TRIGMASK]             ; inp = inp AND trigger, i.e., one as long as trig cond not satisfied (1 cycle)\n\t"
+    "brne TRIGLOOP                            ; wait for trigger (worst case 2 cycles), sum: 16 cycles\n\t"
+    ";Now the sampling loop:\n\t"
+    "SAMPLOOP: sbis %[TIFR1addr], %[OCF1Abit] ; test for timer overflow (2 cycles)\n\t"
+    "rjmp SAMPLOOP                            ; (no cycle!) \n\t"
+    "sbi %[TIFR1addr], %[OCF1Abit]            ; clear overflow bit (2 cycles)\n\t"
+    //    "sbi %[PORTDaddr], 7\n\t"
+    //     "cbi %[PORTDaddr], 7\n\t"
+    "in __tmp_reg__, %[CHANPINaddr]           ; read input data (1 cycle)\n\t"
+    "st %a[LOGICDATAaddr]+, __tmp_reg__       ; store input to array and post increment (2 cycles)\n\t"
+    "cp %A[LOGICDATAaddr], r20                ; compare lower byte of ptr with lower byte of stop addr (1 cycle)\n\t"
+    "brne ENDTEST                             ; OK, jump to test for trigger condition (worst case 1 cycle)\n\t"
+    "cp %B[LOGICDATAaddr], r21                ; compare high bytes (1 cycle)  \n\t"
+    "brne ENDTEST                             ; OK, jump (2 cycles), otherwise execute next instr (1 cycle)\n\t"
+    "movw %A[LOGICDATAaddr], r22              ; restore original value (1 cycle)\n"
+    "ENDTEST: sbiw %A[DELAYCOUNT], 1          ; decrement delayCount (2 cycles)\n\t"
+    "brne SAMPLOOP                            ; continue until delayCount bytes have been sampled, sum: 16 cycles\n\t"
+    "sub %A[LOGICDATAaddr], r22               ; subtract from ptr the base address\n\t"
+    "sbc %B[LOGICDATAaddr], r23               ; high byte subtraction\n\t"
+    "movw %A[LOGICINDEX], %A[LOGICDATAaddr]   ; move value to output variable\n"
+      
+    : [LOGICINDEX] "=r" (logicIndex)
+    : [LOGICDATAaddr] "e" (ptr),	
+      [OCF1Abit] "I" (OCF1A),
+      [CHANPINaddr] "I" (_SFR_IO_ADDR(CHANPIN)),
+      [TIFR1addr] "I" (_SFR_IO_ADDR(TIFR1)),
+      [READCOUNT] "r" (readCount),
+      [DELAYCOUNT] "e" (delayCount), 
+      [TRIGMASK] "r" (trigger),
+      [TRIGVAL] "r" (trigger_values),
+      [PORTDaddr] "I" (_SFR_IO_ADDR(PORTD))
+     : "r20", "r21", "r22", "r23" );
 
-    /*
-     * One sample size delay. ends up being 2 uS combined with assignment
-     * below.  This padding is so we have a consistent timing interval
-     * between the trigger point and the subsequent samples.
-     */
-    delayMicroseconds(1);
-    __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-    __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-
-    /* 'logicIndex' now points to trigger sample, keep track of it */
-    triggerIndex = logicIndex;
-
-    /* keep sampling for delayCount after trigger */
-    DEBUG_ON; /* debug timing measurement */
-    /*
-     * this is currently taking:
-     * 1025.5 uS for 512 samples. (512 samples, 0/100 split)
-     *  513.5 uS for 256 samples. (512 samples, 50/50 split)
-     */
-    for (i = 0 ; i < delayCount; i++) {
-      if (logicIndex >= readCount) {
-        logicIndex = 0;
-      }
-      logicdata[logicIndex++] = CHANPIN;
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-    }
-    DEBUG_OFF; /* debug timing measurement */
-    delayMicroseconds(100);
-  }
-  else {
-    /*
-     * Less than 500KHz case.  This uses delayMicroseconds() and some padding
-     * to get precise timing, at least for the after trigger samples.
-     *
-     * busy loop reading CHANPIN until we trigger.
-     * we always start capturing at the start of the buffer
-     * and use it as a circular buffer
-     *
-     */
-    DEBUG_ON; /* debug timing measurement */
-    while ((trigger_values ^ (logicdata[logicIndex] = CHANPIN)) & trigger) {
-      /* DEBUG_OFF; */
-      /* increment index. */
-      logicIndex++;
-      if (logicIndex >= readCount) {
-        logicIndex = 0;
-      }
-      else {
-        /* pad the same number of cycles as the above assignment (needs verification) */
-        __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-      }
-      delayMicroseconds(delayTime - 3);
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-      /* DEBUG_ON; */
-    }
-    DEBUG_OFF; /* debug timing measurement */
-
-    /* 'logicIndex' now points to trigger sample, keep track of it */
-    triggerIndex = logicIndex;
-
-    /*
-     * This needs adjustment so that we have the right spacing between the
-     * before trigger samples and the after trigger samples.
-     */
-    delayMicroseconds(delayTime - 2);
-    __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-    __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-    __asm__("nop\n\t""nop\n\t""nop\n\t");
-
-    /* keep sampling for delayCount after trigger */
-    DEBUG_ON; /* debug timing measurement */
-    for (i = 0 ; i < delayCount; i++) {
-      if (logicIndex >= readCount) {
-        logicIndex = 0;
-      }
-      logicdata[logicIndex++] = CHANPIN;
-      delayMicroseconds(delayTime - 3);
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-      __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t");
-      __asm__("nop\n\t""nop\n\t""nop\n\t");
-    }
-    DEBUG_OFF; /* debug timing measurement */
-    delayMicroseconds(100);
-  }
-
-  /* re-enable interrupts */
   sei();
 
-  /*
-   * trigger has fired and we have read delayCount of samples after the
-   * trigger fired.  triggerIndex now points to the trigger sample
-   * logicIndex now points to the last sample taken and logicIndex + 1
-   * is where we should start dumping since it is circular.
-   *
-   * our buffer starts one entry above the last read entry.
-   */
-
-  //Reversing dumping to be compatible with PulseView 0.4.1
+  /* Reversing dumping to be compatible with PulseView 0.4.1 */
 #ifdef REVERSED
+  logicIndex--;
   for (i = 0 ; i < readCount; i++) {
     if (logicIndex < 0 ) {
       logicIndex = readCount-1;
     }
-#ifdef USE_PORTD
-    Serial.write(logicdata[logicIndex--] >> 2);
-#else
     Serial.write(logicdata[logicIndex--]);
-#endif
   }
 #else
-  logicIndex++;
   for (i = 0 ; i < readCount; i++) {
     if (logicIndex >= readCount) {
       logicIndex = 0;
     }
-#ifdef USE_PORTD
-    Serial.write(logicdata[logicIndex++] >> 2);
-#else
     Serial.write(logicdata[logicIndex++]);
-#endif
   }
 #endif
 }
 
 /*
- * This function calculates what delay we need for the specific sample rate.
- * The dividers are based on SUMP's 100Mhz clock.
- * For example, a 1MHz sample rate has a divider of 99 (0x63 in the command
- * byte).
- * rate = clock / (divider + 1)
- * rate = 100,000,000 / (99 + 1)
- * result is 1,000,000 saying we want a 1MHz sample rate.
- * We calculate our inter sample delay from the divider and the delay between
- * samples gives us the sample rate per second.
- * So for 1MHz, delay = (99 + 1) / 100 which gives us a 1 microsecond delay.
- * For 500KHz, delay = (199 + 1) / 100 which gives us a 2 microsecond delay.
- *
+ * This function provides sampling with triggering and a circular trigger
+ * buffer for 2 MHz. Timing is done by counting intruction cycles. Triggering
+ * is only rudimentary.
  */
-void setupDelay() {
-  if (divider >= 1500000) {
-    useMicro = 0;
-    delayTime = (divider + 1) / 100000;
+void acquire2MHz() {
+  int i = 0;
+  byte * ptr = &logicdata[0];
+
+  delayCount = readCount - 1;
+  /*
+   * disable interrupts during capture to maintain precision.
+   */
+  cli();
+
+  /* C source code is replaced by inline assembler below
+  do {
+    inp = CHANPIN;
+  } while ((trigger_values ^ inp ) & trigger); 
+  logicdata[0] = inp;
+  
+  // keep sampling for delayCount after trigger
+  for (i = 0 ; i < delayCount; i++) {
+    logicdata[logicIndex++] = CHANPIN;
   }
-  else {
-    useMicro = 1;
-    delayTime = (divider + 1) / 100;
+  */
+
+  asm volatile(
+    "\n\t"
+    "TRIGLOOP2: in __tmp_reg__, %[CHANPINaddr]; read input data (1 cycle)\n\t"
+    "st %a[LOGICDATAaddr], __tmp_reg__        ; store input to array (2 cycles)\n\t"
+    "eor __tmp_reg__, %[TRIGVAL]              ; inp = inp XOR trigger_value., i.e., zero if trigger value present (1 cycle)\n\t"
+    "and __tmp_reg__, %[TRIGMASK]             ; inp = inp AND trigger, i.e., one as long as trig cond not satisfied (1 cycle)\n\t"
+    "brne TRIGLOOP2                           ; wait for trigger (1 cycle if false)\n\t"
+    "adiw %A[LOGICDATAaddr], 1                ; increment pointer, (2 cycles). This makes it 8 cycles!\n\t"
+    ";Now the sampling loop:\n\t"
+    "SAMPLOOP2: in __tmp_reg__, %[CHANPINaddr]; read input data (1 cycle)\n\t"
+    "nop                                      ; cycle padding (1 cycle)\n\t"
+    "st %a[LOGICDATAaddr]+, __tmp_reg__       ; store input to array and post increment (2 cycles)\n\t"
+    "sbiw %A[DELAYCOUNT], 1                   ; decrement delayCount (2 cycles)\n\t"
+    "brne SAMPLOOP2                           ; continue until delayCount bytes have been sampled (2 cycles), sum: 8 cycles\n\t"
+      
+    : 
+    : [LOGICDATAaddr] "e" (ptr),	
+      [CHANPINaddr] "I" (_SFR_IO_ADDR(CHANPIN)),
+      [DELAYCOUNT] "e" (delayCount), 
+      [TRIGMASK] "r" (trigger),
+      [TRIGVAL] "r" (trigger_values) 
+     : );
+
+  sei();
+
+  /* Reversing dumping to be compatible with PulseView 0.4.1 */
+#ifdef REVERSED
+  for (i = readCount-1; i >= 0; i--) {
+#else
+  for (i = 0 ; i < readCount; i++) {
+#endif
+#ifdef USE_PORTD
+  Serial.write(logicdata[i] >> 2);
+#else
+  Serial.write(logicdata[i]);
+#endif
   }
 }
+
 
 /*
  * This function returns the metadata about our capabilities.  It is sent in
  * response to the  OpenBench Logic Sniffer extended get metadata command.
  *
  */
-void get_metadata() {
+void send_metadata() {
   /* device name */
   Serial.write((uint8_t)0x01);
-  Serial.write('A');
-  Serial.write('G');
-  Serial.write('L');
-  Serial.write('A');
-#if defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
-  Serial.write('M');
-#endif /* Mega */
+  Serial.print(F("AGLA"));
 #if defined(REVERSED)
-  Serial.write('R');
-  Serial.write('E');
-  Serial.write('V');
+  Serial.print(F("REV"));
 #endif
-  Serial.write('v');
-  Serial.write('0');
+  Serial.print(F("v1"));
   Serial.write((uint8_t)0x00);
 
   /* firmware version */
   Serial.write((uint8_t)0x02);
-  Serial.write('0');
-  Serial.write('.');
-  Serial.write('1');
-  Serial.write('3');
+  Serial.print(F(FIRMWAREVERSION));
   Serial.write((uint8_t)0x00);
 
   /* sample memory */
@@ -1027,23 +535,34 @@ void get_metadata() {
   Serial.write((uint8_t)0x1C);
   Serial.write((uint8_t)0x00);
 #elif defined(__AVR_ATmega328P__)
-  /* 1024 bytes */
-  Serial.write((uint8_t)0x04);
+  /* 1536 bytes */
+  Serial.write((uint8_t)0x06);
   Serial.write((uint8_t)0x00);
 #else
-  /* 532 bytes */
-  Serial.write((uint8_t)0x02);
-  Serial.write((uint8_t)0x14);
+  #error "MCU not supported"
 #endif /* Mega */
 
-  /* sample rate (4MHz) */
+  /* sample rate (1MHz) */
   Serial.write((uint8_t)0x23);
+#if (MAXMHZ == 1)
   Serial.write((uint8_t)0x00);
-  Serial.write((uint8_t)0x3D);
-  Serial.write((uint8_t)0x09);
+  Serial.write((uint8_t)0x0F);
+  Serial.write((uint8_t)0x42);
+  Serial.write((uint8_t)0x40);
+#elif (MAXMHZ == 2)
   Serial.write((uint8_t)0x00);
-
-  /* number of probes (6 by default on Arduino, 8 on Mega) */
+  Serial.write((uint8_t)0x1E);
+  Serial.write((uint8_t)0x84);
+  Serial.write((uint8_t)0x80);
+#elif (MAXMHZ == 5)
+  Serial.write((uint8_t)0x00);
+  Serial.write((uint8_t)0x4C);
+  Serial.write((uint8_t)0x4B);
+  Serial.write((uint8_t)0x40);
+#else
+  #error "Wrong maximal frequency. Can only be 1, 2, or 5 MHz."
+#endif
+  /* number of probes (6 by default on Arduino UNO, 8 on Mega) */
   Serial.write((uint8_t)0x40);
 #if defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
   Serial.write((uint8_t)0x08);
@@ -1062,114 +581,4 @@ void get_metadata() {
   /* end of data */
   Serial.write((uint8_t)0x00);
 }
-
-/*
- * This is used by the '1' debug command to dump the contents of some
- * interesting variables and the debug buffer.
- *
- */
-#ifdef DEBUG
-void debugprint() {
-  int i;
-
-#if 0
-  Serial.print("divider = ");
-  Serial.println(divider, DEC);
-  Serial.print("delayTime = ");
-  Serial.println(delayTime, DEC);
-  Serial.print("trigger_values = ");
-  Serial.println(trigger_values, BIN);
-#endif
-  Serial.print("readCount = ");
-  Serial.println(readCount, DEC);
-  Serial.print("delayCount = ");
-  Serial.println(delayCount, DEC);
-  Serial.print("logicIndex = ");
-  Serial.println(logicIndex, DEC);
-  Serial.print("triggerIndex = ");
-  Serial.println(triggerIndex, DEC);
-  Serial.print("rleEnabled = ");
-  Serial.println(rleEnabled, DEC);
-
-  Serial.println("Bytes:");
-
-  for (i = 0 ; i < savecount; i++) {
-    if (savebytes[i] == 0x20) {
-      Serial.println();
-    }
-    else {
-      Serial.print(savebytes[i], HEX);
-      Serial.write(' ');
-    }
-  }
-  Serial.println("done...");
-}
-
-#endif /* DEBUG */
-#ifdef DEBUG_MENU
-/*
- * This is used by the '2' debug command to dump the contents
- * of the sample buffer.
- */
-void debugdump() {
-  int i;
-  int j = 1;
-
-  Serial.print("\r\n");
-
-  for (i = 0 ; i < MAX_CAPTURE_SIZE; i++) {
-#ifdef USE_PORTD
-    Serial.print(logicdata[i] >> 2, HEX);
-#else
-    Serial.print(logicdata[i], HEX);
-#endif
-    Serial.print(" ");
-    if (j == 32) {
-      Serial.print("\r\n");
-      j = 0;
-    }
-    j++;
-  }
-}
-
-/*
- * This is used by the '3' debugs command to dump the first 64 bytes
- * of the sample buffer.
- * It prints the data in a graphical representation.
- */
-void prettydump() {
-  int i;
-  byte j;
-  byte k;
-
-  Serial.print("\r\n");
-
-  for (i = 0 ; i < 64; i++) {
-#ifdef USE_PORTD
-    k = logicdata[i] >> 2;
-#else
-    k = logicdata[i];
-#endif
-    for (j = 0; j < 8; j++) {
-      if (k & 0x01)
-        Serial.print("| ");
-      else
-        Serial.print(" |");
-      k = k >> 1;
-    }
-    Serial.print("\r\n");
-  }
-}
-#endif /* DEBUG_MENU */
-
-
-
-
-
-
-
-
-
-
-
 
