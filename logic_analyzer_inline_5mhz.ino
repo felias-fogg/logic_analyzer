@@ -71,6 +71,7 @@ void acquire5MHz() {
    * 5 captures, we insert a NOP in order to 
    * "correct" for capturing too fast. In other words,
    * 5 captures take 16 cycles.
+
    *
    */
   logicdata[1] = CHANPIN;
@@ -8692,11 +8693,7 @@ void acquire5MHz() {
 #else
   for (i = 0 ; i < readCount; i++) {
 #endif
-#ifdef USE_PORTD
-  Serial.write(logicdata[i] >> 2);
-#else
-  Serial.write(logicdata[i]);
-#endif
+    Serial.write(logicdata[i]);
   }
 }
 

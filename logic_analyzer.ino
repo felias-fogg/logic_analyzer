@@ -30,34 +30,40 @@
 /*
  * This Arduino sketch implements the SUMP protocol compatible with PulseView for 
  * AVR MCUs. It is based on Andrew Gillham's implementation, but the acquisition part 
- * has been completely redesigned. It uses inline assembler and relies on Timer1
- * for sampling up to a frequency of 1 MHz. For 2 MHz and 5 MHz special purpose acquisition 
- * procedures are used that wait for the trigger condition, but that are not able to
- * store the required amount of data before the trigger point. The 2 MHz acquisition procedure 
- * uses an inline assembly function. The 5 MHz acquisition procedure is a rolled out loop,
- * which samples at a rate of 5.3333 MHz -- and corrects this error by inserting a NOP after 
- * every fifth sample. In any case, in both procedures, the sample matching the trigger (if any) 
- * is stored as the first sample (which was not the case with Andrew's implementation).
- * 
- * The sketch works probably also with the standard OLS clients when the compile time
- * constant REVERSED is undefined. Since I am not able to install any of the clients,
- * I cannot check that, though.
+ * has been completely redesigned.
  *
- * The sketch should work for the Arduino UNO, Nano, Pro, Pro Mini (i.e. all ATmega328P based boards), 
- * and Mega (i.e., all ATmega1280 and ATmega2560 based boards), provided the clock frequency is 16 MHz.  
- * It is probably possible to adapt it to Leonardo and Pro Micro boards, but this is up to you.
- * 
- * This SUMP protocol compatible logic analyzer for the Arduino board supports
- * 6 channels consisting of digital pins 8-13, where pin 13 is the LED pin.
- * On the Arduino Mega board 8 channels are supported and 7k of samples.
- * Pins 22-29 (Port A) are used by default, you can change the 'CHANPIN' below
- * if something else works better for you.
+ * V0.09 
+ * -  switched the channels BACK to pins 8-13 for trigger reliability.
  *
+ * V0.11
+ * - With v0.11 you can now sample at 4MHz & 2MHz rates in addition to the 
+ *     previous 1MHz and lower rates.  This is done via unrolled loops which
+ *     makes the source code huge and the binary takes much more of the flash.
+ *     v0.11 is just slightly to big for an ATmega168's flash.  You can comment
+ *     out either captureInline2mhz() or captureInline4mhz() and it will fit.
+ *     [ The code automatically skips the 2MHz code now, this isn't needed. ]
+ *
+ * V0.14 - Dec 16, 2015
+ *  - released
+ *
+ * V0.21 - Oct 05, 2021
+ * - took over the reversed sample dumping from dralisz82, corrected 
+ *   the types of the index vars from unsigend to signed and introduced
+ *   the compile-time constant REVERSED to be able to switch between the orders.
+ * - filter out unknown SUMP protocol commands (0xCX), which confused the client
+ *   since the data part could contain a 0x01, which started acquisition
+ *   prematurely.
+ * - redesigned acquisition to use inline assembler and Timer1. Now,
+ *   triggering works up to 1 MHz. The unrolled loop for 2MHz was 
+ *   replaced by an inline assembler loop, which does not maintain
+ *   a buffer for the pre-trigger samples, though. The 4 MHz acquisition
+ *   procedure was modified to work for 5 MHz. Support for ATmega168
+ *   and ATmega32U4 was removed since it was only partial. 
  * 
  */
 #define FIRMWAREVERSION "0.21"
 
-#define MAXMHZ 5 // 2 or 1 are also options, and they both save a lot of flash space!
+#define MAXMHZ 5 // 2 or 1 are also options, and they both save a lot of flash space because with 5, you get an unrolled loop.
 
 #define REVERSED // PulseView wants to receive the sampled data in reverse order
 
@@ -516,9 +522,9 @@ void send_metadata() {
   Serial.write((uint8_t)0x01);
   Serial.print(F("AGLA"));
 #if defined(REVERSED)
-  Serial.print(F("REV"));
+  Serial.print(F("rev"));
 #endif
-  Serial.print(F("v1"));
+  Serial.print(F("V1"));
   Serial.write((uint8_t)0x00);
 
   /* firmware version */
