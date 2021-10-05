@@ -59,9 +59,14 @@
  *   a buffer for the pre-trigger samples, though. The 4 MHz acquisition
  *   procedure was modified to work for 5 MHz. Support for ATmega168
  *   and ATmega32U4 was removed since it was only partial. 
+ *
+ * V0.22
+ * - the "unknown" commands are actually trigger parameters for
+ *   later stages. So, renamed them. Perhaps, at some point
+ *   we can support them.
  * 
  */
-#define FIRMWAREVERSION "0.21"
+#define FIRMWAREVERSION "0.22"
 
 #define MAXMHZ 5 // 2 or 1 are also options, and they both save a lot of flash space because with 5, you get an unrolled loop.
 
@@ -106,14 +111,17 @@
 #define SUMP_TRIGGER_VALUES 0xC1
 #define SUMP_TRIGGER_CONFIG 0xC2
 
-/* some commands that are used by PulseView, but that are undocumented */
-#define SUMP_UNKNOWN_C3 0xC3
-#define SUMP_UNKNOWN_C4 0xC4
-#define SUMP_UNKNOWN_C5 0xC5
-#define SUMP_UNKNOWN_C6 0xC6
-#define SUMP_UNKNOWN_C7 0xC7
-#define SUMP_UNKNOWN_C8 0xC8
-#define SUMP_UNKNOWN_C9 0xC9
+/* some commands that are used by PulseView, but are ignored in AGLA */
+#define SUMP_TRIGGER_MASK2 0xC4
+#define SUMP_TRIGGER_MASK3 0xC8
+#define SUMP_TRIGGER_MASK4 0xCC
+#define SUMP_TRIGGER_VALUES2: 0xC5
+#define SUMP_TRIGGER_VALUES3: 0xC9
+#define SUMP_TRIGGER_VALUES4: 0xCD
+#define SUMP_TRIGGER_CONFIG2: 0xC6
+#define SUMP_TRIGGER_CONFIG3: 0xCA
+#define SUMP_TRIGGER_CONFIG4: 0xCE
+
 
 /* Most flags (except RLE) are ignored. */
 #define SUMP_SET_DIVIDER 0x80
@@ -236,13 +244,15 @@ void loop()
       trigger_values = cmdBytes[0];
       break;
     case SUMP_TRIGGER_CONFIG:
-    case SUMP_UNKNOWN_C3:
-    case SUMP_UNKNOWN_C4:
-    case SUMP_UNKNOWN_C5:
-    case SUMP_UNKNOWN_C6:
-    case SUMP_UNKNOWN_C7:
-    case SUMP_UNKNOWN_C8:
-    case SUMP_UNKNOWN_C9:
+    case SUMP_TRIGGER_MASK2:
+    case SUMP_TRIGGER_MASK3:
+    case SUMP_TRIGGER_MASK4:
+    case SUMP_TRIGGER_VALUES2:
+    case SUMP_TRIGGER_VALUES3:
+    case SUMP_TRIGGER_VALUES4:
+    case SUMP_TRIGGER_CONFIG2:
+    case SUMP_TRIGGER_CONFIG3:
+    case SUMP_TRIGGER_CONFIG4:
       /* read the rest of the command bytes, but ignore them. */
       getCmd();
       break;
