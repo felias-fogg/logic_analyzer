@@ -7,6 +7,8 @@ The sketch sends the acquired samples in a backwards manner to the client, which
 
 On the UNO compatible boards, the six Arduino pins 8-13 are the input channels and the memory depth is 1.5k of samples. On the Arduino Mega board 8 channels are supported and 7k of samples. Pins 22-29 (Port A) are used by default on the Mega boards. It should be easy to adapt the sketch to other boards with AVR MCUs. 
 
+Recently, I wrote a [blog post](https://hinterm-ziel.de/index.php/2021/10/07/doing-it-the-logical-way/) that explains how to use AGLA (the Arduino Generic Logic Analyzer) and logic analyzers in general.
+
 #### Problem ####
 Currently, the sketch seems to work only with PulseView 0.4.2, and you have to press the `scan` button two or three times. The reason behind that is that initially, when connecting, the Arduino is reset and then waits 2 seconds before the sketch is started. So the second or third time, when you press the `scan` button and a connect sequence is sent to the Arduino, it is received and the Arduino replies. With the more recent nightly-built, the initial connect sequence is only sent once even if you press the scan button multiple times, so no connection can be established. A way around it is to disable the auto-reset feature of the UNO. One easy way to do that is to put a 10 µF (or higher) cap between `RESET` and `GND` (plus on `RESET`, minus on `GND`!). Then it also works with the most recent version.
 
